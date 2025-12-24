@@ -1,32 +1,62 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
+import json
 
 st.set_page_config(page_title="RO Water Plant Analytics", layout="wide")
 alt.data_transformers.disable_max_rows()
 
-# -----------------------------
-# LOAD DATA
-# -----------------------------
-@st.cache_data
-def load_data():
-    return pd.read_csv(
-        "data/processed/cleaned_data.csv",
-        parse_dates=["created_at"]
-    )
-
-df = load_data()
-
-# -----------------------------
-# TITLE
-# -----------------------------
+# =========================================================
+# FILE UPLOAD
+# =========================================================
 st.title("🚰 RO Water Plant Business Analytics Dashboard")
 
-# -----------------------------
+uploaded_file = st.file_uploader(
+    "📤 Upload RO Water Plant Transactions (Excel)",
+    type=["xlsx", "xls"]
+)
+
+if uploaded_file is None:
+    st.info("Please upload the Excel file to view the dashboard")
+    st.stop()
+
+# =========================================================
+# LOAD & CLEAN DATA
+# =========================================================
+@st.cache_data
+def load_and_clean_data(file):
+    df = pd.read_excel(file)
+
+    df["created_at"] = pd.to_datetime(
+        df["created_at"],
+        format="%d/%m/%y %H:%M",
+        errors="coerce"
+    )
+
+    def extract_upi(x):
+        try:
+            return json.loads(x).get("upiId")
+        except:
+            return None
+
+    df["upi_id"] = df["payments_notes"].apply(extract_upi)
+
+    df = df.dropna(subset=["created_at", "upi_id"])
+
+    df["date"] = df["created_at"].dt.normalize()
+    df["hour"] = df["created_at"].dt.hour
+    df["day"] = df["created_at"].dt.day_name()
+    df["month"] = df["created_at"].dt.to_period("M").astype(str)
+
+    return df
+
+df = load_and_clean_data(uploaded_file)
+
+# =========================================================
 # DATE FILTER
-# -----------------------------
-min_date = df["created_at"].min().date()
-max_date = df["created_at"].max().date()
+# =========================================================
+min_date = df["date"].min().date()
+max_date = df["date"].max().date()
 
 start_date, end_date = st.date_input(
     "Select Date Range",
@@ -36,17 +66,17 @@ start_date, end_date = st.date_input(
 )
 
 filtered_df = df[
-    (df["created_at"].dt.date >= start_date) &
-    (df["created_at"].dt.date <= end_date)
+    (df["date"].dt.date >= start_date) &
+    (df["date"].dt.date <= end_date)
 ].copy()
 
 if filtered_df.empty:
     st.warning("No data available for selected range.")
     st.stop()
 
-# -----------------------------
+# =========================================================
 # KPI METRICS
-# -----------------------------
+# =========================================================
 c1, c2, c3, c4 = st.columns(4)
 
 c1.metric("Total Revenue (₹)", round(filtered_df["amount"].sum(), 2))
@@ -54,12 +84,7 @@ c2.metric("Transactions", len(filtered_df))
 c3.metric("Unique Customers", filtered_df["upi_id"].nunique())
 c4.metric(
     "Avg Revenue / Day (₹)",
-    round(
-        filtered_df.groupby(filtered_df["created_at"].dt.date)["amount"]
-        .sum()
-        .mean(),
-        2
-    )
+    round(filtered_df.groupby("date")["amount"].sum().mean(), 2)
 )
 
 # =========================================================
@@ -70,7 +95,6 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader("📈 Daily Revenue Trend")
 
-    filtered_df["date"] = filtered_df["created_at"].dt.normalize()
     daily = filtered_df.groupby("date")["amount"].sum().reset_index()
     daily["7_day_avg"] = daily["amount"].rolling(7).mean()
 
@@ -91,7 +115,6 @@ with col1:
 with col2:
     st.subheader("📅 Day-of-Week Demand")
 
-    filtered_df["day"] = filtered_df["created_at"].dt.day_name()
     order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
 
     dow = (
@@ -119,16 +142,16 @@ with col3:
     st.subheader("⏰ Peak Demand Hours")
 
     hourly = (
-        filtered_df.groupby(filtered_df["created_at"].dt.hour)["amount"]
+        filtered_df.groupby("hour")["amount"]
         .sum()
         .reset_index(name="revenue")
     )
 
     st.altair_chart(
         alt.Chart(hourly).mark_bar().encode(
-            x="created_at:O",
+            x="hour:O",
             y="revenue:Q",
-            tooltip=["created_at","revenue"]
+            tooltip=["hour","revenue"]
         ),
         use_container_width=True
     )
@@ -136,7 +159,6 @@ with col3:
 with col4:
     st.subheader("📊 Monthly Growth Rate")
 
-    filtered_df["month"] = filtered_df["created_at"].dt.to_period("M").astype(str)
     monthly = filtered_df.groupby("month")["amount"].sum().reset_index()
     monthly["growth_%"] = monthly["amount"].pct_change() * 100
 
@@ -154,27 +176,24 @@ with col4:
 # =========================================================
 st.subheader("🔥 Revenue by Hour Heatmap")
 
-filtered_df["hour"] = filtered_df["created_at"].dt.hour
-filtered_df["date_only"] = filtered_df["created_at"].dt.date.astype(str)
-
 heatmap = (
-    filtered_df.groupby(["date_only","hour"])["amount"]
+    filtered_df.groupby(["date","hour"])["amount"]
     .sum()
     .reset_index()
 )
 
 st.altair_chart(
     alt.Chart(heatmap).mark_rect().encode(
-        x="date_only:O",
+        x="date:T",
         y="hour:O",
         color="amount:Q",
-        tooltip=["date_only","hour","amount"]
+        tooltip=["date","hour","amount"]
     ),
     use_container_width=True
 )
 
 # =========================================================
-# 2️⃣ CUSTOMER LIFETIME VALUE (CLV)
+# CUSTOMER LIFETIME VALUE
 # =========================================================
 st.subheader("💰 Customer Lifetime Value")
 
@@ -187,37 +206,19 @@ clv = (
 
 st.altair_chart(
     alt.Chart(clv.head(10)).mark_bar().encode(
-        x=alt.X("upi_id:N", sort="-y", title="Customer"),
+        x=alt.X("upi_id:N", sort="-y"),
         y="total_spent:Q",
         tooltip=["upi_id","total_spent"]
     ),
     use_container_width=True
 )
 
-#  
-
 # =========================================================
-# 4️⃣ DAY-WISE AVERAGE REVENUE
-# =========================================================
-st.subheader("📊 Average Revenue per Day")
-
-avg_day = (
-    filtered_df.groupby(filtered_df["created_at"].dt.date)["amount"]
-    .sum()
-    .mean()
-)
-
-st.metric("Average Daily Revenue (₹)", round(avg_day, 2))
-
-# =========================================================
-# 5️⃣ MONTHLY BUSINESS HEALTH SCORE
+# BUSINESS HEALTH SCORE
 # =========================================================
 st.subheader("🏥 Business Health Score")
 
-monthly["health_score"] = (
-    (monthly["growth_%"].fillna(0)) -
-    (filtered_df["settlement_status"] != "processed").mean() * 100
-)
+monthly["health_score"] = monthly["growth_%"].fillna(0)
 
 st.altair_chart(
     alt.Chart(monthly).mark_bar().encode(
@@ -242,11 +243,10 @@ top_customers = (
 )
 
 top_customers.index = range(1, len(top_customers) + 1)
-
 st.dataframe(top_customers, use_container_width=True)
 
 # =========================================================
-# 🔟 DOWNLOAD REPORTS
+# DOWNLOADS
 # =========================================================
 st.subheader("📥 Download Reports")
 
