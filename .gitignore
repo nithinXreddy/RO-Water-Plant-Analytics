@@ -1,0 +1,18 @@
+# Ignore raw data
+data/raw/
+*.xlsx
+*.xls
+
+# Ignore large CSVs
+data/processed/*.csv
+
+# Ignore cache / temp
+__pycache__/
+*.pyc
+
+# Streamlit cache
+.streamlit/
+
+# OS files
+.DS_Store
+Thumbs.db
